@@ -1,3 +1,5 @@
+# Corrections needed - while reading from the .asm file, rest fine ig
+
 import os
 
 # Initialize memory and registers
