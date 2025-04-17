@@ -1,5 +1,3 @@
-# Corrections needed - while reading from the .asm file, rest fine ig 
-
 import os
 
 # Initialize memory and registers
@@ -22,75 +20,74 @@ if not os.path.isfile(file_name):
 instruction_memory = []
 data_labels = {}
 instruction_labels = {}
-current_segment = None
+data_address = 0x10010000  # Starting address for data segment
+instruction_address = 0x00400000  # Starting address for text segment
 
-# Read the file and `.data` and `.text` segments
+# Read the file and process .data and .text segments
 with open(file_name, 'r', encoding='utf-8') as file:
-    print("File has been opened")
+    in_data_section = False
+    in_text_section = False
     for line in file:
-        # Remove comments and strip whitespace
-        line = line.split('#')[0].split('//')[0].strip()
+        line = line.split('#')[0].strip()  # Remove comments
         if not line:
             continue  # Skip empty lines
 
-        # Check for segment declarations
-        if line == ".data":
-            current_segment = "data"
+        if line == '.data':
+            in_data_section = True
+            in_text_section = False
             continue
-        elif line == ".text":
-            current_segment = "text"
-            continue
-
-        # Parse `.data` segment
-        if current_segment == "data":
-            parts = line.split(':')
-            if len(parts) == 2:
-                label = parts[0].strip()
-                value = parts[1].strip()
-                if value.startswith(".asciiz"):
-                    # Handle string data
-                    string_value = value.split(".asciiz")[1].strip().strip('"')
-                    address = max(memory.keys(), default=40) + 4  # Assign a new address
-                    data_labels[label] = address
-                    for char in string_value:
-                        memory[address] = ord(char)
-                        address += 1
-                    memory[address] = 0  # Null terminator
-                elif value.startswith(".word"):
-                    # Handle integer data
-                    word_values = list(map(int, value.split(".word")[1].strip().split(',')))
-                    address = max(memory.keys(), default=40) + 4  # Assign a new address
-                    data_labels[label] = address
-                    for word in word_values:
-                        memory[address] = word
-                        address += 4
-                elif value.startswith(".space"):
-                    # Handle reserved space
-                    size = int(value.split(".space")[1].strip())
-                    address = max(memory.keys(), default=40) + 4  # Assign a new address
-                    data_labels[label] = address
-                    for i in range(0, size, 4):
-                        memory[address + i] = 0
+        elif line == '.text':
+            in_data_section = False
+            in_text_section = True
             continue
 
-        # Parse `.text` segment
-        if current_segment == "text":
-            if line.endswith(':'):
-                label = line.strip(':')
-                instruction_labels[label] = len(instruction_memory)
+        if in_data_section and ':' in line:
+            # Handle data labels
+            label, value = line.split(':', 1)
+            label = label.strip()
+            value = value.strip()
+
+            if value.startswith(".asciiz"):
+                # Handle string data
+                string_value = value.split(".asciiz")[1].strip().strip('"')
+                data_labels[label] = data_address
+                for char in string_value:
+                    memory[data_address] = ord(char)
+                    data_address += 1
+                memory[data_address] = 0  # Null terminator
+                data_address += 1
+            elif value.startswith(".word"):
+                # Handle integer data
+                word_values = list(map(int, value.split(".word")[1].strip().split(',')))
+                data_labels[label] = data_address
+                for word in word_values:
+                    memory[data_address] = word
+                    data_address += 4
+            elif value.startswith(".space"):
+                # Handle reserved space
+                size = int(value.split(".space")[1].strip())
+                data_labels[label] = data_address
+                for _ in range(size):
+                    memory[data_address] = 0
+                    data_address += 1
+        elif in_text_section:
+            if ':' in line:
+                # Handle text labels
+                label, instruction = line.split(':', 1)
+                label = label.strip()
+                instruction_labels[label] = instruction_address
+                if instruction.strip():
+                    # Handle instructions after labels
+                    instruction_memory.append((instruction_address, instruction.strip()))
+                    instruction_address += 4
             else:
-                instruction_memory.append(line)
+                # Handle standalone instructions
+                instruction_memory.append((instruction_address, line.strip()))
+                instruction_address += 4
 
 if not instruction_memory:
     print("Error: No instructions found in .text segment.")
     exit()
-
-# print("Instruction memory and data labels have been initialized.")
-# print(instruction_memory)
-# print('\n')
-# print(instruction_labels)
-# print('\n')
-# print(data_labels)
 
 # Parse registers
 def parse_register(reg):
@@ -114,7 +111,7 @@ def parse_instruction(instr):
     elif opcode in ['beq', 'bne']:
         rs, rt, label = parts[1].strip(','), parts[2].strip(','), parts[3]
         if label in instruction_labels:
-            offset = instruction_labels[label] - (PC + 1)
+            offset = (instruction_labels[label] - (instruction_address + 4)) // 4
         else:
             try:
                 offset = int(label)
@@ -283,7 +280,10 @@ def simulate():
                         result = instr['imm']
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
                     elif instr['opcode'] == 'la':
-                        result = data_labels[instr['label']]
+                        label = instr['label']
+                        if label not in data_labels:
+                            raise KeyError(f"Label '{label}' not found in data_labels.")
+                        result = data_labels[label]
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
                 elif instr['opcode'] == 'syscall':
                     if registers[2] == 1:
@@ -315,21 +315,21 @@ def simulate():
                 elif instr['type'] == 'J':
                     if instr['opcode'] == 'j':
                         delayed_branch = True
-                        branch_target = instr['target']
+                        branch_target = instr['target'] // 4  # Convert address to instruction index
                         delayed_branches += 1
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
                     elif instr['opcode'] == 'jal':
                         delayed_branch = True
-                        branch_target = instr['target']
+                        branch_target = instr['target'] // 4
                         delayed_branches += 1
-                        result = ID_EX['index'] + 2
+                        result = (ID_EX['index'] + 2) * 4
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
                 elif instr['type'] == 'nop':
                     EX_MEM = {'instr': instr, 'cycles_left': 1}
 
             # ID stage
             if IF_ID:
-                instr = parse_instruction(IF_ID['instruction'])
+                instr = parse_instruction(IF_ID['instruction'][1])  # Access instruction string
                 rs_value = registers[instr.get('rs', 0)]
                 rt_value = registers[instr.get('rt', 0)]
                 base_value = registers[instr.get('base', 0)] if 'base' in instr else 0
@@ -341,7 +341,7 @@ def simulate():
             # IF stage
             if PC < len(instruction_memory) and not stall:
                 IF_ID = {'instruction': instruction_memory[PC], 'index': PC}
-                current_stage['IF'] = instruction_memory[PC].split()[0]
+                current_stage['IF'] = instruction_memory[PC][1].split()[0]  # Access instruction string and get opcode
                 if delayed_branch:
                     PC = branch_target
                     delayed_branch = False
