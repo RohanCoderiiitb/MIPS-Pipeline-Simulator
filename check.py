@@ -20,8 +20,8 @@ if not os.path.isfile(file_name):
 instruction_memory = []
 data_labels = {}
 instruction_labels = {}
-data_address = 0x10010000  # Starting address for data segment
-instruction_address = 0x00400000  # Starting address for text segment
+data_address = 0  # Starting address for data segment
+instruction_address = 0  # Starting address for text segment
 
 # Read the file and process .data and .text segments
 with open(file_name, 'r', encoding='utf-8') as file:
