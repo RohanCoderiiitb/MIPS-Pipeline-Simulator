@@ -1,5 +1,6 @@
 import os
 import time
+import random
 
 # Initialize memory and registers
 memory = {}
@@ -7,17 +8,10 @@ registers = [0] * 32
 DATA_SEGMENT_BASE = 0x10000000  # Standard MIPS data segment base
 
 # File handling
-file_name = input('Enter name of the file: ')
-if not file_name.endswith('.asm'):
-    file_name += '.asm'
+file_name = 'Binary.asm'  # Hardcoded input file name
 if not os.path.isfile(file_name):
-    print(f"File '{file_name}' not found in the correct directory")
-    file_name = input("Enter the full path of the file: ")
-    if not file_name.endswith('.asm'):
-        file_name += '.asm'
-    if not os.path.isfile(file_name):
-        print(f"Error: File '{file_name}' not found.")
-        exit()
+    print(f"Error: File '{file_name}' not found.")
+    exit()
 
 instruction_memory = []
 data_labels = {}
@@ -27,7 +21,7 @@ current_address = DATA_SEGMENT_BASE
 
 # Read the file and parse `.data` and `.text` segments
 with open(file_name, 'r', encoding='utf-8') as file:
-    print("File has been opened")
+    print(f"Reading file: {file_name}")
     for line in file:
         # Remove comments and strip whitespace
         line = line.split('#')[0].split('//')[0].strip()
@@ -208,6 +202,8 @@ def simulate():
     delayed_branches = 0
     load_stalls = 0
     cycles_wasted_memory = 0
+    delayed_branch_slots_used = 0
+    total_branches = 0
 
     IF_ID = None
     ID_EX = None
@@ -215,6 +211,10 @@ def simulate():
     MEM_WB = None
     delayed_branch = False
     branch_target = 0
+
+    # Memory access cycles - using fixed values as specified
+    lw_cycles = 2  # Load takes 2 cycles
+    sw_cycles = 3  # Store takes 3 cycles
 
     print("\nPipeline Timing Table:")
     print("| Cycle | IF       | ID       | EX       | MEM      | WB       |")
@@ -226,30 +226,30 @@ def simulate():
 
         # WB stage
         if MEM_WB:
-            if 'rd' in MEM_WB['instr']:
+            if 'rd' in MEM_WB['instr'] and MEM_WB['instr'].get('rd') != 0:  # Avoid writing to $0
                 registers[MEM_WB['instr']['rd']] = MEM_WB['result']
-            elif 'rt' in MEM_WB['instr'] and MEM_WB['instr']['opcode'] in ['lw', 'li', 'la']:
+            elif 'rt' in MEM_WB['instr'] and MEM_WB['instr']['opcode'] in ['lw', 'li', 'la'] and MEM_WB['instr'].get('rt') != 0:
                 registers[MEM_WB['instr']['rt']] = MEM_WB['result']
             elif MEM_WB['instr']['opcode'] == 'jal':
                 registers[31] = MEM_WB['result']
             total_instructions += 1
             current_stage['WB'] = MEM_WB['instr']['opcode']
 
-        # MEM stage
-        stall = False
+        # MEM stage - Handle multi-cycle memory operations
+        mem_stall = False
         if EX_MEM and EX_MEM['cycles_left'] > 1:
             EX_MEM['cycles_left'] -= 1
             memory_stalls += 1
             cycles_wasted_memory += 1
             if EX_MEM['instr']['opcode'] == 'lw':
                 load_stalls += 1
-            stall = True
+            mem_stall = True
             current_stage['MEM'] = f"{EX_MEM['instr']['opcode']} ({EX_MEM['cycles_left']})"
-        else:
-            current_stage['MEM'] = EX_MEM['instr']['opcode'] if EX_MEM else None
+        elif EX_MEM:
+            current_stage['MEM'] = EX_MEM['instr']['opcode']
 
-        # Only update pipeline registers if not stalled
-        if not stall:
+        # Only update pipeline registers if not stalled by memory
+        if not mem_stall:
             MEM_WB = EX_MEM
             EX_MEM = None
 
@@ -257,14 +257,19 @@ def simulate():
             if ID_EX:
                 instr = ID_EX['instr']
                 current_stage['EX'] = instr['opcode']
+                
                 if instr['type'] == 'R':
                     if instr['opcode'] == 'add':
                         result = ID_EX['rs_value'] + ID_EX['rt_value']
+                        EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
+                    elif instr['opcode'] == 'sub':
+                        result = ID_EX['rs_value'] - ID_EX['rt_value']
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
                     elif instr['opcode'] == 'slt':
                         result = 1 if ID_EX['rs_value'] < ID_EX['rt_value'] else 0
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
                     elif instr['opcode'] == 'jr':
+                        total_branches += 1
                         delayed_branch = True
                         branch_target = ID_EX['rs_value']
                         delayed_branches += 1
@@ -275,6 +280,9 @@ def simulate():
                     elif instr['opcode'] == 'srl':
                         result = ID_EX['rt_value'] >> instr['shamt']
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
+                    else:  # Handle other R-type instructions
+                        EX_MEM = {'instr': instr, 'cycles_left': 1}
+                
                 elif instr['type'] == 'I':
                     if instr['opcode'] == 'addi':
                         result = ID_EX['rs_value'] + instr['imm']
@@ -283,12 +291,14 @@ def simulate():
                         result = 1 if ID_EX['rs_value'] < instr['imm'] else 0
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
                     elif instr['opcode'] == 'beq':
+                        total_branches += 1
                         if ID_EX['rs_value'] == ID_EX['rt_value']:
                             delayed_branch = True
                             branch_target = ID_EX['index'] + 1 + instr['offset']
                             delayed_branches += 1
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
                     elif instr['opcode'] == 'bne':
+                        total_branches += 1
                         if ID_EX['rs_value'] != ID_EX['rt_value']:
                             delayed_branch = True
                             branch_target = ID_EX['index'] + 1 + instr['offset']
@@ -297,22 +307,22 @@ def simulate():
                     elif instr['opcode'] == 'lw':
                         address = ID_EX['base_value'] + instr['offset']
                         if address % 4 != 0:
-                            print(f"Warning: Unaligned memory access for lw at address {address}")
+                            print(f"Warning: Unaligned memory access for lw at address 0x{address:08x}")
                         result = (memory.get(address, 0) |
                                 (memory.get(address + 1, 0) << 8) |
                                 (memory.get(address + 2, 0) << 16) |
                                 (memory.get(address + 3, 0) << 24))
-                        EX_MEM = {'instr': instr, 'cycles_left': 2, 'result': result}
+                        EX_MEM = {'instr': instr, 'cycles_left': lw_cycles, 'result': result}
                     elif instr['opcode'] == 'sw':
                         address = ID_EX['base_value'] + instr['offset']
                         if address % 4 != 0:
-                            print(f"Warning: Unaligned memory access for sw at address {address}")
+                            print(f"Warning: Unaligned memory access for sw at address 0x{address:08x}")
                         value = ID_EX['rt_value']
                         memory[address] = value & 0xFF
                         memory[address + 1] = (value >> 8) & 0xFF
                         memory[address + 2] = (value >> 16) & 0xFF
                         memory[address + 3] = (value >> 24) & 0xFF
-                        EX_MEM = {'instr': instr, 'cycles_left': 3}
+                        EX_MEM = {'instr': instr, 'cycles_left': sw_cycles}
                     elif instr['opcode'] == 'li':
                         result = instr['imm']
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
@@ -323,46 +333,27 @@ def simulate():
                         else:
                             result = data_labels[instr['label']]
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
-                elif instr['opcode'] == 'syscall':
-                    if registers[2] == 1:
-                        print(registers[4])
+                    else:  # Handle other I-type instructions
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
-                    elif registers[2] == 4:
-                        address = registers[4]
-                        string = ""
-                        while memory.get(address, 0) != 0:
-                            string += chr(memory[address])
-                            address += 1
-                        print(string, end="")
-                        EX_MEM = {'instr': instr, 'cycles_left': 1}
-                    elif registers[2] == 5:
-                        registers[2] = int(input())
-                        EX_MEM = {'instr': instr, 'cycles_left': 2}
-                    elif registers[2] == 11:
-                        print(chr(registers[4]), end="")
-                        EX_MEM = {'instr': instr, 'cycles_left': 1}
-                    elif registers[2] == 12:
-                        registers[2] = ord(input()[0])
-                        EX_MEM = {'instr': instr, 'cycles_left': 2}
-                    elif registers[2] == 10:
-                        print("Program exited.")
-                        break
-                    else:
-                        print(f"Warning: Unrecognized syscall code {registers[2]}")
-                        EX_MEM = {'instr': instr, 'cycles_left': 1}
+                
                 elif instr['type'] == 'J':
                     if instr['opcode'] == 'j':
+                        total_branches += 1
                         delayed_branch = True
                         branch_target = instr['target']
                         delayed_branches += 1
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
                     elif instr['opcode'] == 'jal':
+                        total_branches += 1
                         delayed_branch = True
                         branch_target = instr['target']
                         delayed_branches += 1
-                        result = ID_EX['index'] + 2
+                        result = ID_EX['index'] + 2  # Return address (PC+8 in bytes)
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
-                elif instr['type'] == 'nop':
+                    else:  # Handle other J-type instructions
+                        EX_MEM = {'instr': instr, 'cycles_left': 1}
+                
+                elif instr['type'] == 'nop' or instr['opcode'] == 'syscall':
                     EX_MEM = {'instr': instr, 'cycles_left': 1}
 
             # ID stage
@@ -371,39 +362,70 @@ def simulate():
                 rs_value = registers[instr.get('rs', 0)]
                 rt_value = registers[instr.get('rt', 0)]
                 base_value = registers[instr.get('base', 0)] if 'base' in instr else 0
-                ID_EX = {'instr': instr, 'rs_value': rs_value, 'rt_value': rt_value, 'base_value': base_value, 'index': IF_ID['index']}
+                ID_EX = {'instr': instr, 'rs_value': rs_value, 'rt_value': rt_value, 
+                         'base_value': base_value, 'index': IF_ID['index']}
                 current_stage['ID'] = instr['opcode']
             else:
                 ID_EX = None
 
             # IF stage
-            if PC < len(instruction_memory) and not stall:
+            if PC < len(instruction_memory) and not mem_stall:
                 IF_ID = {'instruction': instruction_memory[PC], 'index': PC}
                 current_stage['IF'] = instruction_memory[PC].split()[0]
+                
+                # Handle branch delay slot
                 if delayed_branch:
-                    PC = branch_target
+                    delayed_branch_slots_used += 1
+                    PC += 1  # Execute the instruction in the delay slot
                     delayed_branch = False
+                    # After delay slot, jump to target
+                    PC = branch_target
                 else:
                     PC += 1
             else:
                 IF_ID = None
 
-        # Print current pipeline state with delay
+        # Print current pipeline state
         print(f"| {cycle:5d} | {str(current_stage['IF']):8} | {str(current_stage['ID']):8} | {str(current_stage['EX']):8} | {str(current_stage['MEM']):8} | {str(current_stage['WB']):8} |")
-        time.sleep(0.1)  # Simulate pipeline delay
+        time.sleep(0.1)  # Simulate pipeline delay for visualization
 
-        # Termination condition
+        # Termination condition - continue until pipeline is empty
         if PC >= len(instruction_memory) and not MEM_WB and not EX_MEM and not ID_EX and not IF_ID:
             break
 
+    # Calculate branch delay slot effectiveness
+    branch_delay_slot_effectiveness = 0
+    if total_branches > 0:
+        branch_delay_slot_effectiveness = (delayed_branch_slots_used / total_branches) * 100
+
     # Print statistics
-    print(f"\nTotal clock cycles: {cycle}")
+    print("\nSimulation Statistics:")
+    print(f"Total clock cycles: {cycle}")
     print(f"Total instructions executed: {total_instructions}")
     print(f"Total stalls due to memory: {memory_stalls}")
     print(f"Stalls due to loads: {load_stalls}")
     print(f"Delayed branches taken: {delayed_branches}")
-    print(f"Branch delay slot effectiveness: 100% (all delay slots executed)")
+    print(f"Branch delay slot effectiveness: {branch_delay_slot_effectiveness:.2f}%")
     print(f"Cycles wasted due to memory delays: {cycles_wasted_memory}")
+    
+    # Print register state at the end
+    print("\nFinal Register State:")
+    relevant_regs = ['$t1', '$t2', '$t4', '$s0', '$s1', '$s2', '$s5', '$t5', '$t6', '$t7']
+    for reg in relevant_regs:
+        reg_num = parse_register(reg)
+        print(f"{reg} (${reg_num}): {registers[reg_num]}")
+    
+    # Print final memory state for array
+    if 'array' in data_labels:
+        print("\nFinal Array Values:")
+        array_addr = data_labels['array']
+        for i in range(5):  # Hard-coded array size of 5
+            addr = array_addr + (i * 4)
+            value = (memory.get(addr, 0) |
+                    (memory.get(addr + 1, 0) << 8) |
+                    (memory.get(addr + 2, 0) << 16) |
+                    (memory.get(addr + 3, 0) << 24))
+            print(f"array[{i}] = {value}")
 
 if __name__ == "__main__":
     simulate()
