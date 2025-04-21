@@ -1,14 +1,19 @@
 import os
 import time
 import random
+import sys
 
 # Initialize memory and registers
 memory = {}
 registers = [0] * 32
 DATA_SEGMENT_BASE = 0x10000000  # Standard MIPS data segment base
 
-# File handling
-file_name = 'Binary.asm'  # Hardcoded input file name
+# File handling - accept command line argument or prompt user for input
+if len(sys.argv) > 1:
+    file_name = sys.argv[1]
+else:
+    file_name = input("Enter assembly file name (binary.asm or gcd.asm): ")
+
 if not os.path.isfile(file_name):
     print(f"Error: File '{file_name}' not found.")
     exit()
@@ -148,6 +153,17 @@ def parse_instruction(instr, PC):
                 # Return a placeholder value for now
                 return {'type': 'I', 'opcode': 'la', 'rt': parse_register(rt), 'label': label}
             return {'type': 'I', 'opcode': 'la', 'rt': parse_register(rt), 'label': label}
+        elif opcode == 'ble':
+            rs, rt, label = parts[1].strip(','), parts[2].strip(','), parts[3]
+            if label in instruction_labels:
+                offset = instruction_labels[label] - (PC + 1)
+            else:
+                try:
+                    offset = int(label)
+                except ValueError:
+                    print(f"Warning: Undefined label '{label}' at PC {PC}. Available labels: {list(instruction_labels.keys())}")
+                    offset = 0
+            return {'type': 'I', 'opcode': 'ble', 'rs': parse_register(rs), 'rt': parse_register(rt), 'offset': offset}
 
         # R-Type Instructions
         elif opcode in ['add', 'sub', 'and', 'or', 'slt', 'xor', 'nor']:
@@ -280,6 +296,16 @@ def simulate():
                     elif instr['opcode'] == 'srl':
                         result = ID_EX['rt_value'] >> instr['shamt']
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
+                    elif instr['opcode'] == 'sllv':
+                        # Use rs as shift amount for sllv
+                        result = ID_EX['rt_value'] << (ID_EX['rs_value'] & 0x1F)
+                        EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
+                    elif instr['opcode'] == 'or':
+                        result = ID_EX['rs_value'] | ID_EX['rt_value']
+                        EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
+                    elif instr['opcode'] == 'and':
+                        result = ID_EX['rs_value'] & ID_EX['rt_value']
+                        EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
                     else:  # Handle other R-type instructions
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
                 
@@ -300,6 +326,13 @@ def simulate():
                     elif instr['opcode'] == 'bne':
                         total_branches += 1
                         if ID_EX['rs_value'] != ID_EX['rt_value']:
+                            delayed_branch = True
+                            branch_target = ID_EX['index'] + 1 + instr['offset']
+                            delayed_branches += 1
+                        EX_MEM = {'instr': instr, 'cycles_left': 1}
+                    elif instr['opcode'] == 'ble':
+                        total_branches += 1
+                        if ID_EX['rs_value'] <= ID_EX['rt_value']:
                             delayed_branch = True
                             branch_target = ID_EX['index'] + 1 + instr['offset']
                             delayed_branches += 1
@@ -332,6 +365,9 @@ def simulate():
                             result = DATA_SEGMENT_BASE  # Default to data segment base on error
                         else:
                             result = data_labels[instr['label']]
+                        EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
+                    elif instr['opcode'] == 'andi':
+                        result = ID_EX['rs_value'] & instr['imm']
                         EX_MEM = {'instr': instr, 'cycles_left': 1, 'result': result}
                     else:  # Handle other I-type instructions
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
@@ -410,12 +446,12 @@ def simulate():
     
     # Print register state at the end
     print("\nFinal Register State:")
-    relevant_regs = ['$t1', '$t2', '$t4', '$s0', '$s1', '$s2', '$s5', '$t5', '$t6', '$t7']
+    relevant_regs = ['$t1', '$t2', '$t3', '$t4', '$s0', '$s1', '$s2', '$s5', '$t5', '$t6', '$t7']
     for reg in relevant_regs:
         reg_num = parse_register(reg)
         print(f"{reg} (${reg_num}): {registers[reg_num]}")
     
-    # Print final memory state for array
+    # Print final memory state for array if it exists in the data labels
     if 'array' in data_labels:
         print("\nFinal Array Values:")
         array_addr = data_labels['array']
@@ -426,6 +462,11 @@ def simulate():
                     (memory.get(addr + 2, 0) << 16) |
                     (memory.get(addr + 3, 0) << 24))
             print(f"array[{i}] = {value}")
+
+    # For GCD program, display the final GCD value
+    if file_name.lower().startswith('gcd'):
+        print("\nGCD Result:")
+        print(f"GCD of 13 and 7 is: {registers[12]}")  # $t4 contains the result
 
 if __name__ == "__main__":
     simulate()
