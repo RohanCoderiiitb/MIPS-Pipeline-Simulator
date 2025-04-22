@@ -4,26 +4,32 @@ import random
 memory = {i: i // 4 for i in range(0, 40, 4)}  # Memory with initial values 0 to 9 at addresses 0 to 36
 registers = [0] * 32  # 32 registers initialized to 0
 
-# Instruction memory: Array sum with a loop (NOPs removed), corrected beq offset
+# Instruction memory
 instruction_memory = [
-    "add  $t0, $t1, $t2",
-    "add  $t3, $t4, $t5",
-    "lw   $t1, 0($t2)",
-    "addi $s0, $s1, 10",
-    "add  $s2, $s3, $s4",
-    "slti $t6, $t7, 20",
-    "sw   $t3, 4($t4)",
-    "beq  $t3, $zero, 2",
-    "add  $a0, $a1, $a2",
-    "addi $v0, $zero, 4",
-    "add  $t5, $t6, $t7",
-    "lw   $a3, 16($a0)",
-    "sw   $a1, 20($a2)",
+    "addi $t0, $zero, 5",
+    "addi $t1, $zero, 10",
+    "add  $t2, $t0, $t1",
+    "lw   $t3, 0($t2)",
+    "sw   $t3, 4($t2)",
+    "slti $t4, $t3, 20",
+    "beq  $t4, $zero, 2",
+    "add  $s0, $t0, $t4",
+    "lw   $s1, 8($t2)",
+    "sw   $s1, 12($t2)",
+    "addi $s2, $s1, 3",
+    "add  $s3, $s2, $s0",
+    "slti $s4, $s3, 15",
+    "beq  $s4, $zero, 1"
 ]
 
 # Register mapping
 def parse_register(reg):
-    reg_map = {'$zero': 0, '$t0': 8, '$t1': 9, '$t2': 10, '$t3': 11, '$s0': 16}
+    reg_map = {
+        '$zero': 0, '$t0': 8, '$t1': 9, '$t2': 10, '$t3': 11, '$s0': 16,
+        '$t4': 12, '$t5': 13, '$t6': 14, '$t7': 15, '$s1': 17, '$s2': 18,
+        '$s3': 19, '$s4': 20, '$a0': 4, '$a1': 5, '$a2': 6, '$a3': 7,
+        '$v0': 2
+    }
     return reg_map.get(reg, 0)
 
 # Parse MIPS instructions
@@ -43,8 +49,7 @@ def parse_instruction(instr):
         rt, offset_base = parts[1].strip(','), parts[2]
         offset, base = offset_base.split('(')
         base = base.strip(')')
-        op = 'lw' if opcode == 'lw' else 'sw'
-        return {'type': 'I', 'opcode': op, 'rt': parse_register(rt), 'base': parse_register(base), 'offset': int(offset)}
+        return {'type': 'I', 'opcode': opcode, 'rt': parse_register(rt), 'base': parse_register(base), 'offset': int(offset)}
     elif opcode == 'add':
         rd, rs, rt = parts[1].strip(','), parts[2].strip(','), parts[3]
         return {'type': 'R', 'opcode': 'add', 'rd': parse_register(rd), 'rs': parse_register(rs), 'rt': parse_register(rt)}
@@ -53,14 +58,7 @@ def parse_instruction(instr):
     else:
         raise ValueError(f"Unknown instruction: {instr}")
 
-# Check if an instruction is a branch or jump
-def is_branch_or_jump(instruction):
-    if not instruction:
-        return False
-    opcode = instruction['opcode'] if isinstance(instruction, dict) else instruction.split()[0]
-    return opcode in ['beq', 'j']
-
-# Pipeline simulation with dynamic NOP insertion and hazard detection
+# Simulation function
 def simulate():
     PC = 0
     cycle = 0
@@ -78,7 +76,6 @@ def simulate():
     delayed_branch = False
     branch_target = 0
     insert_nop = False  # Flag to insert NOP after branch
-    nop_inserted = False  # Flag to ensure we only insert one NOP
 
     pipeline_log = []
 
@@ -88,12 +85,13 @@ def simulate():
 
         # WB stage
         if MEM_WB:
-            if 'rd' in MEM_WB['instr']:
-                registers[MEM_WB['instr']['rd']] = MEM_WB['result']
-            elif 'rt' in MEM_WB['instr'] and MEM_WB['instr']['opcode'] == 'lw':
-                registers[MEM_WB['instr']['rt']] = MEM_WB['result']
+            instr = MEM_WB['instr']
+            if 'rd' in instr:
+                registers[instr['rd']] = MEM_WB.get('result', 0)
+            elif 'rt' in instr and instr['opcode'] == 'lw':
+                registers[instr['rt']] = MEM_WB.get('result', 0)
             total_instructions += 1
-            current_stage['WB'] = MEM_WB['instr']['opcode']
+            current_stage['WB'] = instr['opcode']
 
         # MEM stage
         stall = False
@@ -108,7 +106,6 @@ def simulate():
         else:
             current_stage['MEM'] = EX_MEM['instr']['opcode'] if EX_MEM else None
 
-        # Only update pipeline registers if not stalled
         if not stall:
             # Move to MEM_WB
             MEM_WB = EX_MEM
@@ -141,7 +138,7 @@ def simulate():
                     elif instr['opcode'] == 'sw':
                         address = ID_EX['base_value'] + instr['offset']
                         memory[address] = ID_EX['rt_value']
-                        EX_MEM = {'instr': instr, 'cycles_left': 3}
+                        EX_MEM = {'instr': instr, 'cycles_left': 2}
                 elif instr['type'] == 'J' and instr['opcode'] == 'j':
                     delayed_branch = True
                     branch_target = instr['target']
@@ -150,46 +147,27 @@ def simulate():
                 elif instr['type'] == 'nop':
                     EX_MEM = {'instr': instr, 'cycles_left': 1}
 
-            # ID stage with hazard detection
+            # ID stage
             if IF_ID:
                 instr = parse_instruction(IF_ID['instruction'])
                 rs_value = registers[instr.get('rs', 0)]
                 rt_value = registers[instr.get('rt', 0)]
                 base_value = registers[instr.get('base', 0)] if 'base' in instr else 0
+                ID_EX = {'instr': instr, 'rs_value': rs_value, 'rt_value': rt_value, 'base_value': base_value, 'index': IF_ID['index']}
+                current_stage['ID'] = instr['opcode']
                 
-                # Data hazard detection
-                stall_hazard = False
-                if instr['opcode'] == 'add' and (EX_MEM and EX_MEM['instr']['opcode'] == 'lw' and 
-                                                (instr['rs'] == EX_MEM['instr']['rt'] or 
-                                                 instr['rt'] == EX_MEM['instr']['rt'])):
-                    stall_hazard = True
-                elif instr['opcode'] == 'add' and (MEM_WB and MEM_WB['instr']['opcode'] == 'lw' and 
-                                                  (instr['rs'] == MEM_WB['instr']['rt'] or 
-                                                   instr['rt'] == MEM_WB['instr']['rt'])):
-                    rs_value = MEM_WB['result'] if instr['rs'] == MEM_WB['instr']['rt'] else rs_value
-                    rt_value = MEM_WB['result'] if instr['rt'] == MEM_WB['instr']['rt'] else rt_value
-
-                if not stall_hazard:
-                    ID_EX = {'instr': instr, 'rs_value': rs_value, 'rt_value': rt_value, 'base_value': base_value, 'index': IF_ID['index']}
-                    current_stage['ID'] = instr['opcode']
-                    
-                    # Detect branch instructions in ID stage to set up NOP insertion flag
-                    if instr['opcode'] in ['beq', 'j']:
-                        insert_nop = True
-                        nop_inserted = False
-                else:
-                    ID_EX = None
-                    current_stage['ID'] = None
+                # Detect branch instructions to set NOP insertion flag
+                if instr['opcode'] in ['beq', 'j']:
+                    insert_nop = True
             else:
                 ID_EX = None
 
-            # IF stage: Fetch every cycle unless stalled
+            # IF stage
             if PC < len(instruction_memory) and not stall:
-                # Check if we need to insert a NOP
-                if insert_nop and not nop_inserted:
-                    IF_ID = {'instruction': "nop", 'index': -1}  # Use -1 to indicate a dynamically inserted NOP
+                if insert_nop:
+                    IF_ID = {'instruction': "nop", 'index': -1}  # Dynamically inserted NOP
                     current_stage['IF'] = "nop"
-                    nop_inserted = True
+                    insert_nop = False
                     dynamic_nops_inserted += 1
                 else:
                     IF_ID = {'instruction': instruction_memory[PC], 'index': PC}
@@ -199,10 +177,6 @@ def simulate():
                         delayed_branch = False
                     else:
                         PC += 1
-                    # Reset NOP insertion flags after fetching a real instruction
-                    if nop_inserted:
-                        insert_nop = False
-                        nop_inserted = False
             else:
                 IF_ID = None
 
@@ -210,24 +184,21 @@ def simulate():
         pipeline_log.append([cycle] + [current_stage[stage] for stage in ['IF', 'ID', 'EX', 'MEM', 'WB']])
 
         # Termination condition
-        if PC >= len(instruction_memory) and not MEM_WB and not EX_MEM and not ID_EX and not IF_ID:
+        if PC >= len(instruction_memory) and not any((MEM_WB, EX_MEM, ID_EX, IF_ID)):
             break
 
-    # Print pipeline timing table
     print("\nPipeline Timing Table:")
     print("| Cycle | IF       | ID       | EX       | MEM      | WB       |")
     print("|-------|----------|----------|----------|----------|----------|")
-    for entry in pipeline_log[:20]:  # Limit to first 20 cycles for brevity
+    for entry in pipeline_log:
         print(f"| {entry[0]:5d} | {str(entry[1]):8} | {str(entry[2]):8} | {str(entry[3]):8} | {str(entry[4]):8} | {str(entry[5]):8} |")
 
-    # Print statistics
     print(f"\nTotal clock cycles: {cycle}")
     print(f"Total instructions executed: {total_instructions}")
     print(f"Total stalls due to memory: {memory_stalls}")
     print(f"Stalls due to loads: {load_stalls}")
     print(f"Delayed branches taken: {delayed_branches}")
     print(f"Dynamic NOPs inserted: {dynamic_nops_inserted}")
-    print(f"Branch delay slot effectiveness: 100% (all delay slots used for NOPs)")
     print(f"Cycles wasted due to memory delays: {cycles_wasted_memory}")
 
 if __name__ == "__main__":
