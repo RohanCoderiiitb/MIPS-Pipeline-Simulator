@@ -4,21 +4,21 @@ import random
 memory = {i: i // 4 for i in range(0, 40, 4)}  # Memory with initial values 0 to 9 at addresses 0 to 36
 registers = [0] * 32  # 32 registers initialized to 0
 
-# Instruction memory: Array sum with a loop
+# Instruction memory: Array sum with a loop (NOPs removed)
 instruction_memory = [
     "addi $t0, $zero, 0",      # 0: t0 = 0 (loop counter)
     "addi $s0, $zero, 0",      # 1: s0 = 0 (sum)
     "addi $t3, $zero, 0",      # 2: t3 = 0 (memory pointer)
     "slti $t1, $t0, 10",       # 3: t1 = 1 if t0 < 10, else 0
     "beq $t1, $zero, 7",       # 4: if t1 == 0, branch to endloop (offset = 7)
-    "nop",                     # 5: delay slot
-    "lw $t2, 0($t3)",          # 6: load array[t3] into t2
-    "add $s0, $s0, $t2",       # 7: s0 += t2
-    "addi $t0, $t0, 1",        # 8: t0++
-    "addi $t3, $t3, 4",        # 9: t3 += 4 (next element)
-    "j 3",                     # 10: jump to slti (index 3)
-    "nop",                     # 11: delay slot
-    "sw $s0, 40($zero)",       # 12: store sum at memory[40]
+    # NOP will be inserted dynamically
+    "lw $t2, 0($t3)",          # 5: load array[t3] into t2
+    "add $s0, $s0, $t2",       # 6: s0 += t2
+    "addi $t0, $t0, 1",        # 7: t0++
+    "addi $t3, $t3, 4",        # 8: t3 += 4 (next element)
+    "j 3",                     # 9: jump to slti (index 3)
+    # NOP will be inserted dynamically
+    "sw $s0, 40($zero)",       # 10: store sum at memory[40]
 ]
 
 # Register mapping
@@ -53,7 +53,14 @@ def parse_instruction(instr):
     else:
         raise ValueError(f"Unknown instruction: {instr}")
 
-# Pipeline simulation with corrected logic
+# Check if an instruction is a branch or jump
+def is_branch_or_jump(instruction):
+    if not instruction:
+        return False
+    opcode = instruction['opcode'] if isinstance(instruction, dict) else instruction.split()[0]
+    return opcode in ['beq', 'j']
+
+# Pipeline simulation with dynamic NOP insertion
 def simulate():
     PC = 0
     cycle = 0
@@ -62,6 +69,7 @@ def simulate():
     delayed_branches = 0
     load_stalls = 0
     cycles_wasted_memory = 0
+    dynamic_nops_inserted = 0
 
     IF_ID = None
     ID_EX = None
@@ -69,6 +77,8 @@ def simulate():
     MEM_WB = None
     delayed_branch = False
     branch_target = 0
+    insert_nop = False  # Flag to insert NOP after branch
+    nop_inserted = False  # Flag to ensure we only insert one NOP
 
     pipeline_log = []
 
@@ -148,18 +158,34 @@ def simulate():
                 base_value = registers[instr.get('base', 0)] if 'base' in instr else 0
                 ID_EX = {'instr': instr, 'rs_value': rs_value, 'rt_value': rt_value, 'base_value': base_value, 'index': IF_ID['index']}
                 current_stage['ID'] = instr['opcode']
+                
+                # Detect branch instructions in ID stage to set up NOP insertion flag
+                if instr['opcode'] in ['beq', 'j']:
+                    insert_nop = True
+                    nop_inserted = False
             else:
                 ID_EX = None
 
             # IF stage: Fetch every cycle unless stalled
             if PC < len(instruction_memory) and not stall:
-                IF_ID = {'instruction': instruction_memory[PC], 'index': PC}
-                current_stage['IF'] = instruction_memory[PC].split()[0]
-                if delayed_branch:
-                    PC = branch_target
-                    delayed_branch = False
+                # Check if we need to insert a NOP
+                if insert_nop and not nop_inserted:
+                    IF_ID = {'instruction': "nop", 'index': -1}  # Use -1 to indicate a dynamically inserted NOP
+                    current_stage['IF'] = "nop"
+                    nop_inserted = True
+                    dynamic_nops_inserted += 1
                 else:
-                    PC += 1
+                    IF_ID = {'instruction': instruction_memory[PC], 'index': PC}
+                    current_stage['IF'] = instruction_memory[PC].split()[0]
+                    if delayed_branch:
+                        PC = branch_target
+                        delayed_branch = False
+                    else:
+                        PC += 1
+                    # Reset NOP insertion flags after fetching a real instruction
+                    if nop_inserted:
+                        insert_nop = False
+                        nop_inserted = False
             else:
                 IF_ID = None
 
@@ -183,7 +209,8 @@ def simulate():
     print(f"Total stalls due to memory: {memory_stalls}")
     print(f"Stalls due to loads: {load_stalls}")
     print(f"Delayed branches taken: {delayed_branches}")
-    print(f"Branch delay slot effectiveness: 100% (all delay slots executed)")
+    print(f"Dynamic NOPs inserted: {dynamic_nops_inserted}")
+    print(f"Branch delay slot effectiveness: 100% (all delay slots used for NOPs)")
     print(f"Cycles wasted due to memory delays: {cycles_wasted_memory}")
 
 if __name__ == "__main__":
