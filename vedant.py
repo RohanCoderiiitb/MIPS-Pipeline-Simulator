@@ -1,4 +1,3 @@
-import random
 import time
 from colorama import Fore, Back, Style, init
 
@@ -12,7 +11,7 @@ registers = [0] * 32  # 32 registers initialized to 0
 # Instruction memory with labels
 instruction_memory_raw = [
     "start: addi $t0, $zero, 0",       # t0 = 0
-    "       slti $t1, $t0, 10"       # s0 = 0
+    "       slti $t1, $t0, 10",        # s0 = 0
     "       addi $t3, $zero, 0",       # t3 = 0 (memory pointer)
     "       addi $t7, $zero, 100",     # t7 = 100 (constant for later use)
     "loop:  slti $t1, $t0, 10",        # if t0 < 10
@@ -135,10 +134,15 @@ def parse_instruction(instr):
     else:
         raise ValueError(f"Unknown instruction: {instr}")
 
-# Color coding for different stages
+# Color coding for different stages with proper alignment
 def color_stage(stage, text):
-    if text is None:
-        return Fore.WHITE + "None" + Style.RESET_ALL
+    if text is None or text == "None":
+        return Fore.WHITE + "None".ljust(8)
+    
+    # Special formatting for NOPs
+    if text == "NOP":
+        return Style.BRIGHT + Fore.RED + "NOP".ljust(8) + Style.RESET_ALL
+    
     colors = {
         'IF': Fore.BLUE,
         'ID': Fore.CYAN,
@@ -146,7 +150,7 @@ def color_stage(stage, text):
         'MEM': Fore.YELLOW,
         'WB': Fore.MAGENTA
     }
-    return colors.get(stage, Fore.WHITE) + f"{text}" + Style.RESET_ALL
+    return colors[stage] + f"{text[:7]}".ljust(8) + Style.RESET_ALL
 
 def simulate():
     PC = 0
@@ -164,6 +168,8 @@ def simulate():
     MEM_WB = None
     delayed_branch = False
     branch_target = 0
+    branch_in_pipeline = False
+    branch_completion_cycle = 0
 
     pipeline_log = []
 
@@ -179,6 +185,11 @@ def simulate():
     while True:
         cycle += 1
         current_stage = {'IF': None, 'ID': None, 'EX': None, 'MEM': None, 'WB': None}
+        insert_nop = False
+
+        # Handle branch pipeline stall
+        if branch_in_pipeline and cycle <= branch_completion_cycle:
+            insert_nop = True
 
         # WB stage
         if MEM_WB:
@@ -259,6 +270,9 @@ def simulate():
                             delayed_branch = True
                             branch_target = instr['offset']
                             delayed_branches += 1
+                        # Mark branch in pipeline
+                        branch_in_pipeline = True
+                        branch_completion_cycle = cycle + 3  # WB at cycle+4
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
                     elif instr['opcode'] in ['bgez', 'bltz']:
                         if (instr['opcode'] == 'bgez' and ID_EX['rs_value'] >= 0) or \
@@ -266,6 +280,9 @@ def simulate():
                             delayed_branch = True
                             branch_target = instr['offset']
                             delayed_branches += 1
+                        # Mark branch in pipeline
+                        branch_in_pipeline = True
+                        branch_completion_cycle = cycle + 3  # WB at cycle+4
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
                     elif instr['opcode'] == 'lw':
                         address = ID_EX['base_value'] + instr['offset']
@@ -282,6 +299,9 @@ def simulate():
                         delayed_branches += 1
                         if instr['opcode'] == 'jal':
                             registers[31] = ID_EX['index'] + 1  # $ra = return address
+                        # Mark branch in pipeline
+                        branch_in_pipeline = True
+                        branch_completion_cycle = cycle + 3  # WB at cycle+4
                         EX_MEM = {'instr': instr, 'cycles_left': 1}
                 elif instr['type'] == 'nop':
                     EX_MEM = {'instr': instr, 'cycles_left': 1}
@@ -298,13 +318,18 @@ def simulate():
                 ID_EX = None
 
             if PC < len(instruction_memory) and not stall:
-                IF_ID = {'instruction': instruction_memory[PC], 'index': PC}
-                current_stage['IF'] = instruction_memory[PC].split()[0]
-                if delayed_branch:
-                    PC = branch_target
-                    delayed_branch = False
+                if insert_nop:
+                    current_stage['IF'] = "NOP"
+                    IF_ID = None
+                    # Don't increment PC - we'll fetch the same instruction next cycle
                 else:
-                    PC += 1
+                    IF_ID = {'instruction': instruction_memory[PC], 'index': PC}
+                    current_stage['IF'] = instruction_memory[PC].split()[0]
+                    if delayed_branch:
+                        PC = branch_target
+                        delayed_branch = False
+                    else:
+                        PC += 1
             else:
                 IF_ID = None
 
@@ -313,9 +338,16 @@ def simulate():
         # Display the pipeline diagram in tabular format
         if cycle <= 30:  # Only show first 30 cycles for brevity
             time.sleep(0.3)  # Delay between cycles
-            print(f"| {cycle:6} | {color_stage('IF', current_stage['IF']):8} | {color_stage('ID', current_stage['ID']):8} | "
-                  f"{color_stage('EX', current_stage['EX']):8} | {color_stage('MEM', current_stage['MEM']):8} | "
-                  f"{color_stage('WB', current_stage['WB']):8} |")
+            print(f"| {cycle:6} | "
+                  f"{color_stage('IF', current_stage['IF'] or 'None')} | "
+                  f"{color_stage('ID', current_stage['ID'] or 'None')} | "
+                  f"{color_stage('EX', current_stage['EX'] or 'None')} | "
+                  f"{color_stage('MEM', current_stage['MEM'] or 'None')} | "
+                  f"{color_stage('WB', current_stage['WB'] or 'None')} |")
+
+        # Reset branch tracking
+        if cycle > branch_completion_cycle:
+            branch_in_pipeline = False
 
         if PC >= len(instruction_memory) and not MEM_WB and not EX_MEM and not ID_EX and not IF_ID:
             break
